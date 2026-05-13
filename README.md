@@ -74,7 +74,7 @@ When using [pi](https://github.com/mariozechner/pi) to work on this project,
 append the project rules so pi always bumps the version and commits:
 
 ```bash
-pi --append-system-prompt .pi/instructions.md
+pi --append-system-prompt .pi/APPEND_SYSTEM.md
 ```
 
 ## Build from Source
