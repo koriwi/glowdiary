@@ -3,6 +3,8 @@ use rusqlite::Connection;
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::timestamp_now;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Meal {
     pub uuid: String,
@@ -53,7 +55,7 @@ pub fn add_meal(
     fddb_source: Option<String>,
 ) -> AppResult<Meal> {
     let uuid = Uuid::now_v7().to_string();
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let now = timestamp_now();
 
     conn.execute(
         "INSERT INTO meals (uuid, user_uuid, name, eaten_at, kcal, fat_g, protein_g, carbs_g, fddb_source, created_at)
@@ -130,14 +132,7 @@ pub fn get_meals_by_day(conn: &Connection, user_uuid: &str, date: &str) -> AppRe
 
 /// Get all meals for a user in the ISO week containing `date`.
 pub fn get_meals_by_week(conn: &Connection, user_uuid: &str, date: &str) -> AppResult<Vec<Meal>> {
-    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .map_err(|e| AppError::InvalidInput(format!("Invalid date '{date}': {e}")))?;
-
-    let weekday = parsed.format("%u").to_string().parse::<u32>().unwrap_or(1);
-    let days_from_monday = weekday - 1;
-
-    let monday = parsed - chrono::Duration::days(days_from_monday as i64);
-    let sunday = monday + chrono::Duration::days(6);
+    let (monday, sunday) = week_bounds(date)?;
 
     let start = format!("{}T00:00:00", monday.format("%Y-%m-%d"));
     let end = format!("{}T23:59:59", sunday.format("%Y-%m-%d"));
@@ -188,14 +183,7 @@ pub fn get_daily_stats(conn: &Connection, user_uuid: &str, date: &str) -> AppRes
 
 /// Compute weekly stats for a user, with per-day breakdown.
 pub fn get_weekly_stats(conn: &Connection, user_uuid: &str, date: &str) -> AppResult<WeeklyStats> {
-    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .map_err(|e| AppError::InvalidInput(format!("Invalid date '{date}': {e}")))?;
-
-    let weekday = parsed.format("%u").to_string().parse::<u32>().unwrap_or(1);
-    let days_from_monday = weekday - 1;
-
-    let monday = parsed - chrono::Duration::days(days_from_monday as i64);
-    let sunday = monday + chrono::Duration::days(6);
+    let (monday, sunday) = week_bounds(date)?;
 
     let mut per_day = Vec::with_capacity(7);
     let mut totals = DailyStats {
@@ -223,18 +211,20 @@ pub fn get_weekly_stats(conn: &Connection, user_uuid: &str, date: &str) -> AppRe
 
     let day_count = per_day.iter().filter(|d| d.meal_count > 0).count().max(1) as f64;
 
+    let daily_averages = DailyStats {
+        date: "daily_average".to_string(),
+        total_kcal: totals.total_kcal / day_count,
+        total_fat_g: totals.total_fat_g / day_count,
+        total_protein_g: totals.total_protein_g / day_count,
+        total_carbs_g: totals.total_carbs_g / day_count,
+        meal_count: (totals.meal_count as f64 / day_count).round() as u64,
+    };
+
     Ok(WeeklyStats {
         week_start: monday.format("%Y-%m-%d").to_string(),
         week_end: sunday.format("%Y-%m-%d").to_string(),
-        totals: totals.clone(),
-        daily_averages: DailyStats {
-            date: "daily_average".to_string(),
-            total_kcal: totals.total_kcal / day_count,
-            total_fat_g: totals.total_fat_g / day_count,
-            total_protein_g: totals.total_protein_g / day_count,
-            total_carbs_g: totals.total_carbs_g / day_count,
-            meal_count: (totals.meal_count as f64 / day_count).round() as u64,
-        },
+        totals,
+        daily_averages,
         per_day,
     })
 }
@@ -242,6 +232,24 @@ pub fn get_weekly_stats(conn: &Connection, user_uuid: &str, date: &str) -> AppRe
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Return (monday, sunday) for the ISO week containing `date`.
+fn week_bounds(date: &str) -> AppResult<(chrono::NaiveDate, chrono::NaiveDate)> {
+    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map_err(|e| AppError::InvalidInput(format!("Invalid date '{date}': {e}")))?;
+
+    let weekday: u32 = parsed
+        .format("%u")
+        .to_string()
+        .parse()
+        .map_err(|_| AppError::InvalidInput(format!("Failed to determine weekday for '{date}'")))?;
+
+    let days_from_monday = weekday.saturating_sub(1);
+    let monday = parsed - chrono::Duration::days(days_from_monday as i64);
+    let sunday = monday + chrono::Duration::days(6);
+
+    Ok((monday, sunday))
+}
 
 fn map_meal(row: &rusqlite::Row<'_>) -> rusqlite::Result<Meal> {
     Ok(Meal {

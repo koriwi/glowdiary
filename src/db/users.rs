@@ -3,6 +3,8 @@ use rusqlite::Connection;
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::timestamp_now;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct User {
     pub uuid: String,
@@ -18,7 +20,7 @@ pub fn create_user(conn: &Connection, name: &str) -> AppResult<User> {
     }
 
     let uuid = Uuid::now_v7().to_string();
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let now = timestamp_now();
 
     conn.execute(
         "INSERT INTO users (uuid, name, created_at) VALUES (?1, ?2, ?3)",
@@ -61,16 +63,15 @@ pub fn get_user(conn: &Connection, uuid: &str) -> AppResult<Option<User>> {
 
 /// Check if a user exists (returns Ok if found, Err(UserNotFound) otherwise).
 pub fn require_user(conn: &Connection, uuid: &str) -> AppResult<()> {
-    let exists: bool =
-        conn.query_row(
-            "SELECT COUNT(*) FROM users WHERE uuid = ?1",
-            rusqlite::params![uuid],
-            |row| row.get::<_, i64>(0),
-        )? > 0;
-
-    if exists {
-        Ok(())
-    } else {
-        Err(AppError::UserNotFound(uuid.to_string()))
+    match conn.query_row(
+        "SELECT 1 FROM users WHERE uuid = ?1 LIMIT 1",
+        rusqlite::params![uuid],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(AppError::UserNotFound(uuid.to_string()))
+        }
+        Err(e) => Err(AppError::Database(e)),
     }
 }

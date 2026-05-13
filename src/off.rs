@@ -72,7 +72,7 @@ struct RawProduct {
     serving_size: Option<String>,
     #[serde(default)]
     nutriments: RawNutriments,
-    // For search results, Open Food Facts nests inside "product"
+    /// Nested product field used by some API response shapes.
     #[serde(default)]
     product: Option<Box<RawProduct>>,
 }
@@ -114,16 +114,18 @@ pub fn search(query: &str) -> AppResult<Vec<FoodSearchResult>> {
     let body = http_get_with_retry(&url, 3)?;
 
     let response: SearchResponse = serde_json::from_str(&body)
-        .map_err(|e| AppError::FddbApi(format!("Search JSON parse failed: {e}")))?;
+        .map_err(|e| AppError::FoodApi(format!("Search JSON parse failed: {e}")))?;
 
-    let results: Vec<FoodSearchResult> = response
-        .products
-        .into_iter()
-        .filter_map(|raw| raw_to_search_result(raw).ok())
-        .collect();
+    let mut results = Vec::new();
+    for raw in response.products {
+        match raw_to_search_result(raw) {
+            Ok(r) => results.push(r),
+            Err(e) => tracing::warn!("Skipping search result: {e}"),
+        }
+    }
 
     if results.is_empty() {
-        return Err(AppError::FddbApi(format!(
+        return Err(AppError::FoodApi(format!(
             "No products found for '{query}'"
         )));
     }
@@ -138,17 +140,17 @@ pub fn lookup_barcode(barcode: &str) -> AppResult<ProductInfo> {
     let body = http_get_with_retry(&url, 2)?;
 
     let response: ProductResponse = serde_json::from_str(&body)
-        .map_err(|e| AppError::FddbApi(format!("Product JSON parse failed: {e}")))?;
+        .map_err(|e| AppError::FoodApi(format!("Product JSON parse failed: {e}")))?;
 
     if response.status != 1 {
-        return Err(AppError::FddbApi(format!(
+        return Err(AppError::FoodApi(format!(
             "Product not found for barcode '{barcode}'"
         )));
     }
 
     let raw = response
         .product
-        .ok_or_else(|| AppError::FddbApi(format!("Empty product data for '{barcode}'")))?;
+        .ok_or_else(|| AppError::FoodApi(format!("Empty product data for '{barcode}'")))?;
 
     raw_to_product_info(raw)
 }
@@ -168,8 +170,17 @@ pub fn compute_nutrition(per_100g: &Nutrition, grams: f64) -> Nutrition {
 // Internals
 // ---------------------------------------------------------------------------
 
-fn raw_to_search_result(raw: RawProduct) -> AppResult<FoodSearchResult> {
-    // Search results might have `product` nested (v2 API shape)
+/// Parsed fields common to search results and product lookups.
+struct ParsedRaw {
+    product_name: String,
+    barcode: String,
+    quantity: Option<String>,
+    per_100g: Nutrition,
+    serving: Option<ServingInfo>,
+}
+
+fn parse_raw_product(raw: RawProduct) -> AppResult<ParsedRaw> {
+    // Search results may have the product nested inside a top-level "product" field.
     let actual = match raw.product {
         Some(p) => *p,
         None => raw,
@@ -177,15 +188,15 @@ fn raw_to_search_result(raw: RawProduct) -> AppResult<FoodSearchResult> {
 
     let product_name = actual
         .product_name
-        .ok_or_else(|| AppError::FddbApi("Missing product name".into()))?;
+        .ok_or_else(|| AppError::FoodApi("Missing product name".into()))?;
     let barcode = actual
         .code
-        .ok_or_else(|| AppError::FddbApi("Missing barcode".into()))?;
+        .ok_or_else(|| AppError::FoodApi("Missing barcode".into()))?;
 
     let per_100g = parse_per_100g(&actual.nutriments);
     let serving = parse_serving(&actual.nutriments, &actual.serving_size);
 
-    Ok(FoodSearchResult {
+    Ok(ParsedRaw {
         product_name,
         barcode,
         quantity: actual.quantity,
@@ -194,22 +205,24 @@ fn raw_to_search_result(raw: RawProduct) -> AppResult<FoodSearchResult> {
     })
 }
 
+fn raw_to_search_result(raw: RawProduct) -> AppResult<FoodSearchResult> {
+    let p = parse_raw_product(raw)?;
+    Ok(FoodSearchResult {
+        product_name: p.product_name,
+        barcode: p.barcode,
+        quantity: p.quantity,
+        per_100g: p.per_100g,
+        serving: p.serving,
+    })
+}
+
 fn raw_to_product_info(raw: RawProduct) -> AppResult<ProductInfo> {
-    let product_name = raw
-        .product_name
-        .ok_or_else(|| AppError::FddbApi("Missing product name".into()))?;
-    let barcode = raw
-        .code
-        .ok_or_else(|| AppError::FddbApi("Missing barcode".into()))?;
-
-    let per_100g = parse_per_100g(&raw.nutriments);
-    let serving = parse_serving(&raw.nutriments, &raw.serving_size);
-
+    let p = parse_raw_product(raw)?;
     Ok(ProductInfo {
-        product_name,
-        barcode,
-        per_100g,
-        serving,
+        product_name: p.product_name,
+        barcode: p.barcode,
+        per_100g: p.per_100g,
+        serving: p.serving,
     })
 }
 
@@ -227,7 +240,7 @@ fn parse_serving(n: &RawNutriments, serving_size: &Option<String>) -> Option<Ser
     if size.is_empty() {
         return None;
     }
-    // Only return serving info if at least kcal_serving is present
+    // Only return serving info if at least kcal_serving is present.
     n.energy_kcal_serving?;
 
     Some(ServingInfo {
@@ -242,17 +255,20 @@ fn parse_serving(n: &RawNutriments, serving_size: &Option<String>) -> Option<Ser
 }
 
 fn urlencode(s: &str) -> String {
-    // Minimal URL encoding — sufficient for food search terms
-    s.chars()
-        .map(|c| match c {
-            ' ' => '+'.to_string(),
-            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' => c.to_string(),
-            c => format!("%{:02X}", c as u8),
+    // Percent-encode per RFC 3986: unreserved chars pass through,
+    // space becomes '+', everything else is percent-encoded.
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b' ' => "+".to_string(),
+            _ => format!("%{:02X}", b),
         })
         .collect()
 }
 
-/// HTTP GET with retries and exponential backoff for transient failures (503, timeout).
+/// HTTP GET with retries and exponential backoff for transient failures (503, 429, 502).
 fn http_get_with_retry(url: &str, max_retries: u32) -> AppResult<String> {
     let mut last_error = None;
 
@@ -272,35 +288,35 @@ fn http_get_with_retry(url: &str, max_retries: u32) -> AppResult<String> {
                 if status == 200 {
                     return response
                         .into_string()
-                        .map_err(|e| AppError::FddbApi(format!("Read body failed: {e}")));
+                        .map_err(|e| AppError::FoodApi(format!("Read body failed: {e}")));
                 } else if status == 503 || status == 429 || status == 502 {
-                    last_error = Some(AppError::FddbApi(format!(
-                        "Server error (status {status}) for: {url}"
+                    last_error = Some(AppError::FoodApi(format!(
+                        "Server error (status {status}), retrying..."
                     )));
-                    // Retry on 503/429/502
                     continue;
                 } else {
-                    return Err(AppError::FddbApi(format!(
+                    return Err(AppError::FoodApi(format!(
                         "Unexpected status {status} for: {url}"
                     )));
                 }
             }
-            Err(ureq::Error::Status(status, _)) if status == 503 || status == 429 || status == 502 => {
-                last_error = Some(AppError::FddbApi(format!(
-                    "Server error (status {status}) for: {url}"
+            Err(ureq::Error::Status(status, _))
+                if status == 503 || status == 429 || status == 502 =>
+            {
+                last_error = Some(AppError::FoodApi(format!(
+                    "Server error (status {status}), retrying..."
                 )));
-                // Retry
                 continue;
             }
             Err(e) => {
-                return Err(AppError::FddbApi(format!(
-                    "Request failed after {attempt} retries: {e}"
-                )));
+                return Err(AppError::FoodApi(format!("Request failed: {e}")));
             }
         }
     }
 
     Err(last_error.unwrap_or_else(|| {
-        AppError::FddbApi(format!("Request failed after {max_retries} retries for: {url}"))
+        AppError::FoodApi(format!(
+            "Request failed after {max_retries} retries for: {url}"
+        ))
     }))
 }

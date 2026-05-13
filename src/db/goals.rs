@@ -2,6 +2,8 @@ use crate::error::{AppError, AppResult};
 use rusqlite::Connection;
 use serde::Serialize;
 
+use super::{DEFAULT_CARBS_G_TARGET, DEFAULT_FAT_G_TARGET, DEFAULT_KCAL_TARGET, DEFAULT_PROTEIN_G_TARGET};
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Goals {
     pub kcal_target: f64,
@@ -32,10 +34,10 @@ pub fn get_goals(conn: &Connection, user_uuid: &str) -> AppResult<Goals> {
             // No goals row exists (shouldn't happen if user was created properly),
             // return sensible defaults
             Ok(Goals {
-                kcal_target: 2000.0,
-                fat_g_target: 65.0,
-                protein_g_target: 75.0,
-                carbs_g_target: 275.0,
+                kcal_target: DEFAULT_KCAL_TARGET,
+                fat_g_target: DEFAULT_FAT_G_TARGET,
+                protein_g_target: DEFAULT_PROTEIN_G_TARGET,
+                carbs_g_target: DEFAULT_CARBS_G_TARGET,
             })
         }
         Err(e) => Err(AppError::Database(e)),

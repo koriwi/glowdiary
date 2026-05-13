@@ -4,6 +4,30 @@ pub mod users;
 
 use rusqlite::Connection;
 
+// ---------------------------------------------------------------------------
+// Default nutrition goals — single source of truth for the application.
+// ---------------------------------------------------------------------------
+
+pub const DEFAULT_KCAL_TARGET: f64 = 2000.0;
+pub const DEFAULT_FAT_G_TARGET: f64 = 65.0;
+pub const DEFAULT_PROTEIN_G_TARGET: f64 = 75.0;
+pub const DEFAULT_CARBS_G_TARGET: f64 = 275.0;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Current UTC timestamp in ISO 8601 format (e.g. "2026-05-13T12:30:00.123Z").
+pub fn timestamp_now() -> String {
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// DB setup
+// ---------------------------------------------------------------------------
+
 /// Open (or create) the SQLite database and run migrations.
 pub fn open(path: &str) -> anyhow::Result<Connection> {
     let conn = Connection::open(path)?;

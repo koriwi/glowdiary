@@ -12,7 +12,7 @@ pub enum AppError {
     MealNotFound(String),
 
     #[error("Open Food Facts API error: {0}")]
-    FddbApi(String),
+    FoodApi(String),
 
     #[error("HTTP request failed: {0}")]
     Http(#[from] ureq::Error),
@@ -22,10 +22,6 @@ pub enum AppError {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-
-    #[error("UUID generation error: {0}")]
-    Uuid(#[from] uuid::Error),
-
 }
 
 pub type AppResult<T> = Result<T, AppError>;

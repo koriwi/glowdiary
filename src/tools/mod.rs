@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::db;
-use crate::fddb;
+use crate::off;
 
 // ---------------------------------------------------------------------------
 // Core server state
@@ -26,7 +26,6 @@ use crate::fddb;
 #[derive(Clone)]
 pub struct GlowDiary {
     db: Arc<Mutex<Connection>>,
-    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
@@ -55,8 +54,6 @@ impl GlowDiary {
             }
         })
     }
-
-
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +142,47 @@ pub struct SearchFoodParams {
 pub struct BarcodeParam {
     #[schemars(description = "Product barcode / GTIN")]
     pub barcode: String,
+}
+
+// ---------------------------------------------------------------------------
+// Response types for stats tools
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct StatsWithGoals {
+    date: String,
+    total_kcal: f64,
+    total_fat_g: f64,
+    total_protein_g: f64,
+    total_carbs_g: f64,
+    meal_count: u64,
+    goals: db::goals::Goals,
+    remaining_kcal: f64,
+    remaining_fat_g: f64,
+    remaining_protein_g: f64,
+    remaining_carbs_g: f64,
+    kcal_percent: f64,
+    fat_percent: f64,
+    protein_percent: f64,
+    carbs_percent: f64,
+}
+
+#[derive(Serialize)]
+struct WeeklyWithGoals {
+    week_start: String,
+    week_end: String,
+    total_kcal: f64,
+    total_fat_g: f64,
+    total_protein_g: f64,
+    total_carbs_g: f64,
+    total_meal_count: u64,
+    daily_average_kcal: f64,
+    daily_average_fat_g: f64,
+    daily_average_protein_g: f64,
+    daily_average_carbs_g: f64,
+    daily_average_kcal_percent: f64,
+    per_day: Vec<db::meals::DailyStats>,
+    goals: db::goals::Goals,
 }
 
 // ---------------------------------------------------------------------------
@@ -263,41 +301,43 @@ impl GlowDiary {
     #[tool(description = "Log a meal from a food product looked up via search_food or lookup_barcode. Specify the barcode and the amount eaten in grams. Nutrition is automatically calculated from the product's per-100g data.")]
     fn add_meal_from_food(
         &self,
-        Parameters(AddMealFromFoodParams {
-            user_uuid,
-            name,
-            eaten_at,
-            barcode,
-            grams,
-        }): Parameters<AddMealFromFoodParams>,
+        Parameters(params): Parameters<AddMealFromFoodParams>,
     ) -> String {
-        if grams <= 0.0 {
-            return format!("{{\"error\": \"grams must be > 0, got {grams}\"}}");
+        if params.grams <= 0.0 {
+            return format!("{{\"error\": \"grams must be > 0, got {}\"}}", params.grams);
         }
 
-        // Look up the product
-        let product = match fddb::lookup_barcode(&barcode) {
-            Ok(p) => p,
-            Err(e) => return format!("{{\"error\": \"Failed to look up barcode '{barcode}': {e}\"}}"),
-        };
+        let db = self.db.clone();
+        tokio::task::block_in_place(move || {
+            let product = match off::lookup_barcode(&params.barcode) {
+                Ok(p) => p,
+                Err(e) => return format!(
+                    "{{\"error\": \"Failed to look up barcode '{}': {e}\"}}",
+                    params.barcode
+                ),
+            };
 
-        // Compute nutrition for the given weight
-        let nutrition = fddb::compute_nutrition(&product.per_100g, grams);
+            let nutrition = off::compute_nutrition(&product.per_100g, params.grams);
 
-        self.with_db(move |conn| {
-            db::users::require_user(conn, &user_uuid)?;
-            let meal = db::meals::add_meal(
-                conn,
-                &user_uuid,
-                &name,
-                &eaten_at,
-                nutrition.kcal,
-                nutrition.fat_g,
-                nutrition.protein_g,
-                nutrition.carbs_g,
-                Some(barcode),
-            )?;
-            Ok(meal)
+            let conn = db.lock().unwrap();
+            match (|| -> crate::error::AppResult<_> {
+                db::users::require_user(&conn, &params.user_uuid)?;
+                db::meals::add_meal(
+                    &conn,
+                    &params.user_uuid,
+                    &params.name,
+                    &params.eaten_at,
+                    nutrition.kcal,
+                    nutrition.fat_g,
+                    nutrition.protein_g,
+                    nutrition.carbs_g,
+                    Some(params.barcode),
+                )
+            })() {
+                Ok(meal) => serde_json::to_string_pretty(&meal)
+                    .unwrap_or_else(|e| format!("{{\"error\": \"Serialization failed: {e}\"}}")),
+                Err(e) => format!("{{\"error\": \"{e}\"}}"),
+            }
         })
     }
 
@@ -377,25 +417,6 @@ impl GlowDiary {
             let stats = db::meals::get_daily_stats(conn, &user_uuid, &date)?;
             let goals = db::goals::get_goals(conn, &user_uuid)?;
 
-            #[derive(Serialize)]
-            struct StatsWithGoals {
-                date: String,
-                total_kcal: f64,
-                total_fat_g: f64,
-                total_protein_g: f64,
-                total_carbs_g: f64,
-                meal_count: u64,
-                goals: db::goals::Goals,
-                remaining_kcal: f64,
-                remaining_fat_g: f64,
-                remaining_protein_g: f64,
-                remaining_carbs_g: f64,
-                kcal_percent: f64,
-                fat_percent: f64,
-                protein_percent: f64,
-                carbs_percent: f64,
-            }
-
             let remaining_kcal = (goals.kcal_target - stats.total_kcal).max(0.0);
             let remaining_fat_g = (goals.fat_g_target - stats.total_fat_g).max(0.0);
             let remaining_protein_g = (goals.protein_g_target - stats.total_protein_g).max(0.0);
@@ -452,24 +473,6 @@ impl GlowDiary {
             let stats = db::meals::get_weekly_stats(conn, &user_uuid, &date)?;
             let goals = db::goals::get_goals(conn, &user_uuid)?;
 
-            #[derive(Serialize)]
-            struct WeeklyWithGoals {
-                week_start: String,
-                week_end: String,
-                total_kcal: f64,
-                total_fat_g: f64,
-                total_protein_g: f64,
-                total_carbs_g: f64,
-                total_meal_count: u64,
-                daily_average_kcal: f64,
-                daily_average_fat_g: f64,
-                daily_average_protein_g: f64,
-                daily_average_carbs_g: f64,
-                daily_average_kcal_percent: f64,
-                per_day: Vec<db::meals::DailyStats>,
-                goals: db::goals::Goals,
-            }
-
             let daily_avg_kcal_pct = if goals.kcal_target > 0.0 {
                 (stats.daily_averages.total_kcal / goals.kcal_target) * 100.0
             } else {
@@ -504,13 +507,15 @@ impl GlowDiary {
         &self,
         Parameters(SearchFoodParams { query }): Parameters<SearchFoodParams>,
     ) -> String {
-        match fddb::search(&query) {
-            Ok(results) => {
-                serde_json::to_string_pretty(&serde_json::json!({ "results": results }))
-                    .unwrap_or_else(|e| format!("{{\"error\": \"Serialization failed: {e}\"}}"))
+        tokio::task::block_in_place(move || {
+            match off::search(&query) {
+                Ok(results) => {
+                    serde_json::to_string_pretty(&serde_json::json!({ "results": results }))
+                        .unwrap_or_else(|e| format!("{{\"error\": \"Serialization failed: {e}\"}}"))
+                }
+                Err(e) => format!("{{\"error\": \"{e}\"}}"),
             }
-            Err(e) => format!("{{\"error\": \"{e}\"}}"),
-        }
+        })
     }
 
     #[tool(description = "Look up a food product by its barcode on Open Food Facts. Returns product name, barcode, per-100g nutrition, and serving size info if available.")]
@@ -518,13 +523,15 @@ impl GlowDiary {
         &self,
         Parameters(BarcodeParam { barcode }): Parameters<BarcodeParam>,
     ) -> String {
-        match fddb::lookup_barcode(&barcode) {
-            Ok(product) => {
-                serde_json::to_string_pretty(&product)
-                    .unwrap_or_else(|e| format!("{{\"error\": \"Serialization failed: {e}\"}}"))
+        tokio::task::block_in_place(move || {
+            match off::lookup_barcode(&barcode) {
+                Ok(product) => {
+                    serde_json::to_string_pretty(&product)
+                        .unwrap_or_else(|e| format!("{{\"error\": \"Serialization failed: {e}\"}}"))
+                }
+                Err(e) => format!("{{\"error\": \"{e}\"}}"),
             }
-            Err(e) => format!("{{\"error\": \"{e}\"}}"),
-        }
+        })
     }
 }
 
