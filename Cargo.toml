@@ -1,6 +1,6 @@
 [package]
 name = "glowdiary"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A food diary MCP server with meal tracking, nutrition stats, and Open Food Facts integration"
 

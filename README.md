@@ -2,6 +2,8 @@
 
 Track your meals, nutrition, and daily goals. An MCP stdio server written in Rust.
 
+**Current version:** [v$(cat VERSION)](https://github.com/koriwi/glowdiary/releases)
+
 ## Quick Start
 
 ```bash
@@ -39,19 +41,40 @@ glowdiary --db-path ~/.glowdiary/data.db
 
 ## Docker
 
-```dockerfile
-FROM debian:bookworm-slim
+Always pin to a specific version for reproducible builds:
 
-# Download latest GlowDiary release
-ADD https://github.com/koriwi/glowdiary/releases/latest/download/glowdiary-x86_64-unknown-linux-gnu.tar.gz /tmp/
+```dockerfile
+FROM debian:bookworm-slim AS glowdiary
+ARG GLOWDIARY_VERSION=0.1.0
+ADD https://github.com/koriwi/glowdiary/releases/download/continuous/glowdiary-x86_64-unknown-linux-gnu.tar.gz /tmp/
 RUN tar xzf /tmp/glowdiary-x86_64-unknown-linux-gnu.tar.gz -C /usr/local/bin/ && \
     chmod +x /usr/local/bin/glowdiary && \
     rm /tmp/glowdiary-x86_64-unknown-linux-gnu.tar.gz
+```
 
-VOLUME /data
-EXPOSE 0  # stdio only
+The `continuous` tag always points to the latest build. For stability, pin to a
+[release tag](https://github.com/koriwi/glowdiary/releases) instead.
 
-ENTRYPOINT ["glowdiary", "--db-path", "/data/glowdiary.db"]
+## Versioning
+
+This project follows [SemVer](https://semver.org/). The current version is in
+[`VERSION`](VERSION) and [`Cargo.toml`](Cargo.toml).
+
+To bump the version:
+
+```bash
+./scripts/bump-version.sh patch   # 0.1.0 → 0.1.1 (bug fixes)
+./scripts/bump-version.sh minor   # 0.1.0 → 0.2.0 (new features)
+./scripts/bump-version.sh major   # 0.1.0 → 1.0.0 (breaking changes)
+```
+
+## Working with pi
+
+When using [pi](https://github.com/mariozechner/pi) to work on this project,
+append the project rules so pi always bumps the version and commits:
+
+```bash
+pi --append-system-prompt .pi/instructions.md
 ```
 
 ## Build from Source

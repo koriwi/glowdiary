@@ -15,6 +15,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Read version
+        id: version
+        run: echo "VERSION=$(cat VERSION | tr -d ' \n')" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -41,27 +45,30 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: continuous
-          name: Continuous Build
+          name: "Continuous Build (v${{ steps.version.outputs.VERSION }})"
           body: |
             Auto-built from commit `${{ github.sha }}` on `${{ github.ref_name }}`.
 
+            **Version:** v${{ steps.version.outputs.VERSION }}
+
             ## Usage in Docker
 
+            Pin to a specific version:
             ```dockerfile
             ADD https://github.com/${{ github.repository }}/releases/download/continuous/glowdiary-x86_64-unknown-linux-gnu.tar.gz /tmp/
             RUN tar xzf /tmp/glowdiary-x86_64-unknown-linux-gnu.tar.gz -C /usr/local/bin/ && \
                 chmod +x /usr/local/bin/glowdiary
             ```
 
+            Or download a specific version from [Releases](https://github.com/${{ github.repository }}/releases).
+
             ## `--db-path` / data persistence
 
             Mount a volume to persist the SQLite database:
-
             ```dockerfile
             VOLUME /data
-            # or at runtime: -v glowdiary-data:/data
-            # run with: glowdiary --db-path /data/glowdiary.db
             ```
+            Run with: `glowdiary --db-path /data/glowdiary.db`
           files: |
             glowdiary-x86_64-unknown-linux-gnu.tar.gz
           make_latest: true

@@ -3,3 +3,5 @@
 *.db-wal
 *.db-shm
 .env
+
+# Keep VERSION, scripts, .pi
