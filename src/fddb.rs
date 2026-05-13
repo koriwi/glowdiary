@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 
@@ -109,12 +111,7 @@ pub fn search(query: &str) -> AppResult<Vec<FoodSearchResult>> {
         urlencode(query)
     );
 
-    let body = ureq::get(&url)
-        .set("User-Agent", "GlowDiary/0.1 (food-diary-mcp)")
-        .call()
-        .map_err(|e| AppError::FddbApi(format!("Search request failed: {e}")))?
-        .into_string()
-        .map_err(|e| AppError::FddbApi(format!("Search read body failed: {e}")))?;
+    let body = http_get_with_retry(&url, 3)?;
 
     let response: SearchResponse = serde_json::from_str(&body)
         .map_err(|e| AppError::FddbApi(format!("Search JSON parse failed: {e}")))?;
@@ -138,12 +135,7 @@ pub fn search(query: &str) -> AppResult<Vec<FoodSearchResult>> {
 pub fn lookup_barcode(barcode: &str) -> AppResult<ProductInfo> {
     let url = format!("{}/{}.json", PRODUCT_URL, barcode);
 
-    let body = ureq::get(&url)
-        .set("User-Agent", "GlowDiary/0.1 (food-diary-mcp)")
-        .call()
-        .map_err(|e| AppError::FddbApi(format!("Product lookup failed: {e}")))?
-        .into_string()
-        .map_err(|e| AppError::FddbApi(format!("Product read body failed: {e}")))?;
+    let body = http_get_with_retry(&url, 2)?;
 
     let response: ProductResponse = serde_json::from_str(&body)
         .map_err(|e| AppError::FddbApi(format!("Product JSON parse failed: {e}")))?;
@@ -258,4 +250,57 @@ fn urlencode(s: &str) -> String {
             c => format!("%{:02X}", c as u8),
         })
         .collect()
+}
+
+/// HTTP GET with retries and exponential backoff for transient failures (503, timeout).
+fn http_get_with_retry(url: &str, max_retries: u32) -> AppResult<String> {
+    let mut last_error = None;
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let delay = Duration::from_millis(500 * 2u64.pow(attempt - 1));
+            std::thread::sleep(delay);
+        }
+
+        let result = ureq::get(url)
+            .set("User-Agent", "GlowDiary/0.1 (food-diary-mcp)")
+            .call();
+
+        match result {
+            Ok(response) => {
+                let status = response.status();
+                if status == 200 {
+                    return response
+                        .into_string()
+                        .map_err(|e| AppError::FddbApi(format!("Read body failed: {e}")));
+                } else if status == 503 || status == 429 || status == 502 {
+                    last_error = Some(AppError::FddbApi(format!(
+                        "Server error (status {status}) for: {url}"
+                    )));
+                    // Retry on 503/429/502
+                    continue;
+                } else {
+                    return Err(AppError::FddbApi(format!(
+                        "Unexpected status {status} for: {url}"
+                    )));
+                }
+            }
+            Err(ureq::Error::Status(status, _)) if status == 503 || status == 429 || status == 502 => {
+                last_error = Some(AppError::FddbApi(format!(
+                    "Server error (status {status}) for: {url}"
+                )));
+                // Retry
+                continue;
+            }
+            Err(e) => {
+                return Err(AppError::FddbApi(format!(
+                    "Request failed after {attempt} retries: {e}"
+                )));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        AppError::FddbApi(format!("Request failed after {max_retries} retries for: {url}"))
+    }))
 }
