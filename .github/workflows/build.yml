@@ -12,12 +12,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout (full history for VERSION diff)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Read version
+      # ------------------------------------------------------------------
+      # Version detection
+      # ------------------------------------------------------------------
+
+      - name: Read current version
         id: version
         run: echo "VERSION=$(cat VERSION | tr -d ' \n')" >> "$GITHUB_OUTPUT"
+
+      - name: Detect version bump
+        id: bump
+        run: |
+          CURRENT="$(cat VERSION | tr -d ' \n')"
+          # Compare with parent commit — if VERSION changed, tag the release
+          PREV="$(git show HEAD~1:VERSION 2>/dev/null | tr -d ' \n' || echo 'none')"
+          if [ "$CURRENT" != "$PREV" ]; then
+            echo "BUMPED=true" >> "$GITHUB_OUTPUT"
+            echo "PREV_VERSION=$PREV" >> "$GITHUB_OUTPUT"
+            echo "Version bumped: $PREV → $CURRENT"
+          else
+            echo "BUMPED=false" >> "$GITHUB_OUTPUT"
+            echo "No version bump, skipping tag creation"
+          fi
+
+      # ------------------------------------------------------------------
+      # Build
+      # ------------------------------------------------------------------
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -25,21 +50,39 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
 
+      # ------------------------------------------------------------------
+      # Package
+      # ------------------------------------------------------------------
+
       - name: Package binary
         run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          TARBALL="glowdiary-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+
           mkdir -p dist
           cp target/release/glowdiary dist/
           cp README.md dist/ 2>/dev/null || true
           cd dist
-          tar czf ../glowdiary-x86_64-unknown-linux-gnu.tar.gz glowdiary
-          ls -lh ../glowdiary-x86_64-unknown-linux-gnu.tar.gz
+          tar czf "../${TARBALL}" glowdiary README.md
+          ls -lh "../${TARBALL}"
+
+          echo "TARBALL=${TARBALL}" >> "$GITHUB_OUTPUT"
+        id: package
+
+      # ------------------------------------------------------------------
+      # Upload artifact
+      # ------------------------------------------------------------------
 
       - name: Upload binary as CI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: glowdiary-x86_64-unknown-linux-gnu
+          name: glowdiary-v${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu
           path: dist/glowdiary
           retention-days: 7
+
+      # ------------------------------------------------------------------
+      # Create / update continuous release (always points to latest master)
+      # ------------------------------------------------------------------
 
       - name: Create or update continuous release
         uses: softprops/action-gh-release@v2
@@ -55,8 +98,8 @@ jobs:
 
             Pin to a specific version:
             ```dockerfile
-            ADD https://github.com/${{ github.repository }}/releases/download/continuous/glowdiary-x86_64-unknown-linux-gnu.tar.gz /tmp/
-            RUN tar xzf /tmp/glowdiary-x86_64-unknown-linux-gnu.tar.gz -C /usr/local/bin/ && \
+            ADD https://github.com/${{ github.repository }}/releases/download/continuous/glowdiary-v${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz /tmp/
+            RUN tar xzf /tmp/glowdiary-v${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz -C /usr/local/bin/ && \
                 chmod +x /usr/local/bin/glowdiary
             ```
 
@@ -70,6 +113,54 @@ jobs:
             ```
             Run with: `glowdiary --db-path /data/glowdiary.db`
           files: |
-            glowdiary-x86_64-unknown-linux-gnu.tar.gz
+            ${{ steps.package.outputs.TARBALL }}
           make_latest: true
+          fail_on_unmatched_files: true
+
+      # ------------------------------------------------------------------
+      # Versioned release + git tag (only when VERSION changed)
+      # ------------------------------------------------------------------
+
+      - name: Create versioned git tag
+        if: steps.bump.outputs.BUMPED == 'true'
+        run: |
+          VERSION="v${{ steps.version.outputs.VERSION }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "${VERSION}"
+
+      - name: Create versioned GitHub Release
+        if: steps.bump.outputs.BUMPED == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: "GlowDiary v${{ steps.version.outputs.VERSION }}"
+          body: |
+            Release v${{ steps.version.outputs.VERSION }}
+
+            **Changes:** ${{ github.server_url }}/${{ github.repository }}/compare/${{ steps.bump.outputs.PREV_VERSION }}...v${{ steps.version.outputs.VERSION }}
+
+            ## Binary
+
+            | Platform | Asset |
+            |---|---|
+            | Linux x86_64 | `glowdiary-v${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz` |
+
+            Download the tarball for your platform, extract, and run:
+            ```bash
+            tar xzf glowdiary-v${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+            ./glowdiary --db-path ./glowdiary.db
+            ```
+
+            ## Docker
+
+            ```dockerfile
+            ADD https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.VERSION }}/glowdiary-v${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz /tmp/
+            RUN tar xzf /tmp/glowdiary-v${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz -C /usr/local/bin/ && \
+                chmod +x /usr/local/bin/glowdiary
+            ```
+          files: |
+            ${{ steps.package.outputs.TARBALL }}
+          make_latest: false
           fail_on_unmatched_files: true
